@@ -1,0 +1,20 @@
+# .NET build output
+**/bin/
+**/obj/
+dist/
+
+# Local files
+*.user
+*.suo
+*.log
+*.tmp
+*.pdb
+
+# Generated samples and archives
+*.png
+*.zip
+
+# User-installed engine: never commit or package these files
+engine/*.exe
+engine/*.dll
+engine/models/

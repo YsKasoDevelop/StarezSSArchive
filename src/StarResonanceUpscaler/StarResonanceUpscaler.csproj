@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>StarezSSArchive</AssemblyName>
+    <RootNamespace>StarezSSArchive</RootNamespace>
+    <AssemblyTitle>スタレゾ SS アーカイブ</AssemblyTitle>
+    <Title>スタレゾ SS アーカイブ</Title>
+    <Product>スタレゾ SS アーカイブ</Product>
+    <FileDescription>スタレゾ SS アーカイブ</FileDescription>
+    <Description>スクリーンショット自動バックアップ＆高画質化（Star Resonance向け非公式ファンツール）</Description>
+    <Company>Starez SS Archive contributors</Company>
+    <Copyright>Copyright (c) 2026 Starez SS Archive contributors</Copyright>
+    <Version>1.00</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.00.0.0</FileVersion>
+    <InformationalVersion>1.00</InformationalVersion>
+    <ApplicationIcon>icon.ico</ApplicationIcon>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="icon.ico" />
+  </ItemGroup>
+</Project>
