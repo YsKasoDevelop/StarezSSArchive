@@ -8,7 +8,7 @@ using Forms = System.Windows.Forms;
 internal static class AppInfo
 {
     public const string Name = "スタレゾ SS アーカイブ";
-    public const string Version = "1.01";
+    public const string Version = "1.02";
     public const string Description = "スクリーンショット自動バックアップ＆高画質化\nStar Resonance向け非公式ファンツール\n公式の承認・提携・保証はありません";
     public const string DataFolderName = "StarezSSArchive";
     public const string LegacyDataFolderName = "BPSRSSbackup";
@@ -21,6 +21,7 @@ internal static class AppInfo
     public static string LegacySettingsFile => Path.Combine(LegacyDataFolder, "settings.json");
     public static string OlderSettingsFile => Path.Combine(OlderDataFolder, "settings.json");
     public static string LogFile => Path.Combine(DataFolder, "app.log");
+    public static string ProcessedLedgerFile => Path.Combine(DataFolder, "processed.json");
 }
 
 internal static class Program
@@ -30,7 +31,7 @@ internal static class Program
     {
         if (args.Length == 3 && string.Equals(args[0], "--sample", StringComparison.OrdinalIgnoreCase))
         {
-            Enhancer.Process(Path.GetFullPath(args[1]), Path.GetFullPath(args[2]), false);
+            Environment.ExitCode = RunSample(args[1], args[2]);
             return;
         }
         Forms.Application.EnableVisualStyles();
@@ -47,9 +48,23 @@ internal static class Program
         var tray = TrayContext.Create();
         if (tray is not null) Forms.Application.Run(tray);
     }
+
+    internal static int RunSample(string input, string output)
+    {
+        try
+        {
+            Enhancer.Process(Path.GetFullPath(input), Path.GetFullPath(output), false);
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"画像処理に失敗しました。{ex.Message}");
+            return 1;
+        }
+    }
 }
 
-internal sealed record AppSettings(string ScreenshotFolder, string BackupFolder, string OriginalFolder, bool RetouchEnabled, bool StartWithWindows, bool TtaEnabled, bool NotificationsEnabled)
+internal sealed record AppSettings(string ScreenshotFolder, string BackupFolder, string OriginalFolder, bool RetouchEnabled, bool StartWithWindows, bool TtaEnabled, bool NotificationsEnabled, string BatchFolder, bool DiscardOriginalEnabled)
 {
     public static AppSettings Default
     {
@@ -61,7 +76,7 @@ internal sealed record AppSettings(string ScreenshotFolder, string BackupFolder,
             var starAsia = Path.Combine(pictures, "StarASIA");
             var steam = Path.Combine(pictures, "StarASIA_STEAM");
             var archiveRoot = Directory.Exists(starAsia) ? starAsia : Directory.Exists(steam) ? steam : starAsia;
-            return new(screenshotRoot, Path.Combine(archiveRoot, "backup"), Path.Combine(archiveRoot, "original"), true, false, false, false);
+            return new(screenshotRoot, Path.Combine(archiveRoot, "backup"), Path.Combine(archiveRoot, "original"), true, false, false, false, screenshotRoot, false);
         }
     }
 }
@@ -81,6 +96,90 @@ internal sealed record ReconfigureCapture(
     DateTime StartedAtUtc,
     string PreviousScreenshotFolder,
     IReadOnlyList<string> CandidatePaths);
+
+internal readonly record struct ProcessedFileStamp(long Length, long LastWriteTimeUtcTicks);
+
+internal sealed class ProcessedLedger
+{
+    private readonly object _gate = new();
+    private readonly string _filePath;
+    private readonly Action<string> _log;
+    private readonly Dictionary<string, ProcessedFileStamp> _entries = new(StringComparer.OrdinalIgnoreCase);
+
+    public ProcessedLedger(string filePath, Action<string> log)
+    {
+        _filePath = filePath;
+        _log = log;
+        Load();
+    }
+
+    public bool Matches(string path)
+    {
+        if (!TryRead(path, out var stamp)) return false;
+        string key;
+        try { key = Path.GetFullPath(path); }
+        catch { return false; }
+        lock (_gate) return _entries.TryGetValue(key, out var previous) && previous == stamp;
+    }
+
+    public void Mark(string path)
+    {
+        if (!TryRead(path, out var stamp)) return;
+        string key;
+        try { key = Path.GetFullPath(path); }
+        catch { return; }
+        lock (_gate)
+        {
+            _entries[key] = stamp;
+            try { SaveLocked(); }
+            catch (Exception ex) { _log($"処理済み記録の保存に失敗しました: {ex.Message}"); }
+        }
+    }
+
+    private void Load()
+    {
+        try
+        {
+            if (!File.Exists(_filePath)) return;
+            var loaded = JsonSerializer.Deserialize<Dictionary<string, ProcessedFileStamp>>(File.ReadAllText(_filePath));
+            if (loaded is null) return;
+            foreach (var entry in loaded)
+            {
+                try { _entries[Path.GetFullPath(entry.Key)] = entry.Value; }
+                catch { }
+            }
+        }
+        catch (Exception ex) { _log($"処理済み記録を読み込めませんでした: {ex.Message}"); }
+    }
+
+    private void SaveLocked()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(_filePath)!);
+        var temporary = _filePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllText(temporary, JsonSerializer.Serialize(_entries, new JsonSerializerOptions { WriteIndented = true }));
+            File.Move(temporary, _filePath, true);
+        }
+        finally
+        {
+            try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
+        }
+    }
+
+    private static bool TryRead(string path, out ProcessedFileStamp stamp)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists) { stamp = default; return false; }
+            stamp = new(info.Length, info.LastWriteTimeUtc.Ticks);
+            return true;
+        }
+        catch (IOException) { stamp = default; return false; }
+        catch (UnauthorizedAccessException) { stamp = default; return false; }
+    }
+}
 
 internal static class SettingsStore
 {
@@ -186,12 +285,17 @@ internal static class SettingsStore
         }
     }
 
-    private static AppSettings Normalize(AppSettings value) => value with
+    private static AppSettings Normalize(AppSettings value)
     {
-        ScreenshotFolder = FullPathOr(value.ScreenshotFolder, AppSettings.Default.ScreenshotFolder),
-        BackupFolder = FullPathOr(value.BackupFolder, AppSettings.Default.BackupFolder),
-        OriginalFolder = FullPathOr(value.OriginalFolder, AppSettings.Default.OriginalFolder)
-    };
+        var screenshot = FullPathOr(value.ScreenshotFolder, AppSettings.Default.ScreenshotFolder);
+        return value with
+        {
+            ScreenshotFolder = screenshot,
+            BackupFolder = FullPathOr(value.BackupFolder, AppSettings.Default.BackupFolder),
+            OriginalFolder = FullPathOr(value.OriginalFolder, AppSettings.Default.OriginalFolder),
+            BatchFolder = FullPathOr(value.BatchFolder, screenshot)
+        };
+    }
 
     private static string FullPathOr(string? value, string fallback)
     {
@@ -244,7 +348,12 @@ internal sealed class TrayContext : Forms.ApplicationContext
                 Forms.MessageBox.Show($"設定を保存できませんでした。\n{ex.Message}", AppInfo.Name, Forms.MessageBoxButtons.OK, Forms.MessageBoxIcon.Error);
                 return null;
             }
-            try { return new TrayContext(form.Result); }
+            try
+            {
+                var context = new TrayContext(form.Result);
+                if (form.BatchProcessRequested) context.StartBatchProcess(form.Result.BatchFolder);
+                return context;
+            }
             catch (Exception ex)
             {
                 Forms.MessageBox.Show($"監視を開始できませんでした。\n{ex.Message}", AppInfo.Name, Forms.MessageBoxButtons.OK, Forms.MessageBoxIcon.Error);
@@ -401,7 +510,8 @@ internal sealed class TrayContext : Forms.ApplicationContext
             SelectFile(path);
             return;
         }
-        OpenFolder(_settings.ScreenshotFolder);
+        var folder = !string.IsNullOrWhiteSpace(path) ? Path.GetDirectoryName(path) : null;
+        OpenFolder(folder ?? _settings.ScreenshotFolder);
     }
 
     private void OpenLog()
@@ -431,6 +541,11 @@ internal sealed class TrayContext : Forms.ApplicationContext
         _pauseItem.Text = paused ? "再開" : "一時停止";
     }
 
+    internal void StartBatchProcess(string folder)
+    {
+        _ = _watcher.QueueUnprocessedAsync(folder);
+    }
+
     private async void ShowSettings()
     {
         if (_settingsChanging) return;
@@ -453,6 +568,7 @@ internal sealed class TrayContext : Forms.ApplicationContext
                 ApplyStartupRegistration(form.Result.StartWithWindows);
                 if (!_watcher.ResumeAcceptance()) throw new InvalidOperationException("新しい監視を開始できませんでした。");
                 _watcher.QueueReconfigureCapture(capture, form.Result.ScreenshotFolder);
+                if (form.BatchProcessRequested) StartBatchProcess(form.Result.BatchFolder);
             }
             catch
             {
@@ -617,38 +733,45 @@ internal sealed class SettingsForm : Forms.Form
     private readonly Forms.TextBox _screenshotBox = new();
     private readonly Forms.TextBox _backupBox = new();
     private readonly Forms.TextBox _originalBox = new();
+    private readonly Forms.TextBox _batchBox = new();
     private readonly Forms.CheckBox _retouchBox = new() { Text = "レタッチ機能を有効にする", AutoSize = true };
     private readonly Forms.CheckBox _ttaBox = new() { Text = "TTAを有効にする（処理時間が長くなります）", AutoSize = true };
     private readonly Forms.CheckBox _startupBox = new() { Text = "Windowsログオン時にタスクトレイで起動する", AutoSize = true };
     private readonly Forms.CheckBox _notificationsBox = new() { Text = "処理完了・エラーを通知する", AutoSize = true };
+    private readonly Forms.CheckBox _discardOriginalBox = new() { Text = "オリジナルファイルを残さない（元に戻せません）", AutoSize = true };
     public AppSettings? Result { get; private set; }
+    public bool BatchProcessRequested { get; private set; }
 
     public SettingsForm(AppSettings settings, bool firstRun = false)
     {
         Text = firstRun ? $"{AppInfo.Name} - 初回設定" : $"{AppInfo.Name} - 設定";
         StartPosition = Forms.FormStartPosition.CenterScreen;
         FormBorderStyle = Forms.FormBorderStyle.FixedDialog;
-        MaximizeBox = false; MinimizeBox = false; Width = 760; Height = 400;
-        var table = new Forms.TableLayoutPanel { Dock = Forms.DockStyle.Fill, Padding = new Forms.Padding(12), ColumnCount = 3, RowCount = 9 };
+        MaximizeBox = false; MinimizeBox = false; Width = 760; Height = 480;
+        var table = new Forms.TableLayoutPanel { Dock = Forms.DockStyle.Fill, Padding = new Forms.Padding(12), ColumnCount = 3, RowCount = 11 };
         table.ColumnStyles.Add(new Forms.ColumnStyle(Forms.SizeType.Absolute, 180));
         table.ColumnStyles.Add(new Forms.ColumnStyle(Forms.SizeType.Percent, 100));
         table.ColumnStyles.Add(new Forms.ColumnStyle(Forms.SizeType.Absolute, 90));
-        foreach (var height in new[] { 38, 38, 38, 34, 34, 34, 34, 1, 42 }) table.RowStyles.Add(new Forms.RowStyle(Forms.SizeType.Absolute, height));
+        foreach (var height in new[] { 38, 38, 38, 38, 34, 34, 34, 34, 34, 1, 50 }) table.RowStyles.Add(new Forms.RowStyle(Forms.SizeType.Absolute, height));
         table.Controls.Add(new Forms.Label { Text = "スクリーンショット監視先", AutoSize = true, Anchor = Forms.AnchorStyles.Left }, 0, 0);
         AddPathRow(table, _screenshotBox, settings.ScreenshotFolder, 0);
         table.Controls.Add(new Forms.Label { Text = "バックアップ保存先", AutoSize = true, Anchor = Forms.AnchorStyles.Left }, 0, 1);
         AddPathRow(table, _backupBox, settings.BackupFolder, 1);
         table.Controls.Add(new Forms.Label { Text = "加工前の原本保存先", AutoSize = true, Anchor = Forms.AnchorStyles.Left }, 0, 2);
         AddPathRow(table, _originalBox, settings.OriginalFolder, 2);
-        table.Controls.Add(_retouchBox, 1, 3); table.SetColumnSpan(_retouchBox, 2);
-        table.Controls.Add(_ttaBox, 1, 4); table.SetColumnSpan(_ttaBox, 2);
-        table.Controls.Add(_startupBox, 1, 5); table.SetColumnSpan(_startupBox, 2);
-        table.Controls.Add(_notificationsBox, 1, 6); table.SetColumnSpan(_notificationsBox, 2);
-        _retouchBox.Checked = settings.RetouchEnabled; _ttaBox.Checked = settings.TtaEnabled; _startupBox.Checked = settings.StartWithWindows; _notificationsBox.Checked = settings.NotificationsEnabled;
+        table.Controls.Add(new Forms.Label { Text = "未処理画像の一括処理先", AutoSize = true, Anchor = Forms.AnchorStyles.Left }, 0, 3);
+        AddPathRow(table, _batchBox, settings.BatchFolder, 3);
+        table.Controls.Add(_retouchBox, 1, 4); table.SetColumnSpan(_retouchBox, 2);
+        table.Controls.Add(_ttaBox, 1, 5); table.SetColumnSpan(_ttaBox, 2);
+        table.Controls.Add(_startupBox, 1, 6); table.SetColumnSpan(_startupBox, 2);
+        table.Controls.Add(_notificationsBox, 1, 7); table.SetColumnSpan(_notificationsBox, 2);
+        table.Controls.Add(_discardOriginalBox, 1, 8); table.SetColumnSpan(_discardOriginalBox, 2);
+        _retouchBox.Checked = settings.RetouchEnabled; _ttaBox.Checked = settings.TtaEnabled; _startupBox.Checked = settings.StartWithWindows; _notificationsBox.Checked = settings.NotificationsEnabled; _discardOriginalBox.Checked = settings.DiscardOriginalEnabled;
         var buttons = new Forms.FlowLayoutPanel { Dock = Forms.DockStyle.Fill, FlowDirection = Forms.FlowDirection.RightToLeft };
+        var batch = new Forms.Button { Text = "保存して一括処理", Width = 145 }; batch.Click += (_, _) => Commit(true);
         var ok = new Forms.Button { Text = firstRun ? "保存して開始" : "保存", Width = 110 }; ok.Click += (_, _) => Commit();
         var cancel = new Forms.Button { Text = "キャンセル", Width = 90, DialogResult = Forms.DialogResult.Cancel };
-        buttons.Controls.Add(ok); buttons.Controls.Add(cancel); table.Controls.Add(buttons, 0, 8); table.SetColumnSpan(buttons, 3);
+        buttons.Controls.Add(batch); buttons.Controls.Add(ok); buttons.Controls.Add(cancel); table.Controls.Add(buttons, 0, 10); table.SetColumnSpan(buttons, 3);
         Controls.Add(table); AcceptButton = ok; CancelButton = cancel;
     }
 
@@ -660,19 +783,22 @@ internal sealed class SettingsForm : Forms.Form
         table.Controls.Add(button, 2, row);
     }
 
-    private void Commit()
+    private void Commit(bool batchRequested = false)
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(_screenshotBox.Text) || string.IsNullOrWhiteSpace(_backupBox.Text) || string.IsNullOrWhiteSpace(_originalBox.Text)) throw new InvalidOperationException("すべてのフォルダを指定してください。");
+            if (string.IsNullOrWhiteSpace(_screenshotBox.Text) || string.IsNullOrWhiteSpace(_backupBox.Text) || string.IsNullOrWhiteSpace(_originalBox.Text) || string.IsNullOrWhiteSpace(_batchBox.Text)) throw new InvalidOperationException("すべてのフォルダを指定してください。");
             var screenshot = Path.GetFullPath(_screenshotBox.Text.Trim());
             var backup = Path.GetFullPath(_backupBox.Text.Trim());
             var original = Path.GetFullPath(_originalBox.Text.Trim());
-            if (Overlaps(screenshot, backup) || Overlaps(screenshot, original) || Overlaps(backup, original)) throw new InvalidOperationException("監視先・バックアップ先・原本保存先は重ならない別フォルダを指定してください。");
+            var batch = Path.GetFullPath(_batchBox.Text.Trim());
+            if (Overlaps(screenshot, backup) || Overlaps(screenshot, original) || Overlaps(backup, original) || Overlaps(batch, backup) || Overlaps(batch, original)) throw new InvalidOperationException("監視先・一括処理先・バックアップ先・原本保存先の組み合わせを確認してください。バックアップ先と原本保存先は別フォルダにしてください。");
             ValidateWritableFolder("監視先", screenshot);
             ValidateWritableFolder("バックアップ保存先", backup);
             ValidateWritableFolder("原本保存先", original);
-            Result = new AppSettings(screenshot, backup, original, _retouchBox.Checked, _startupBox.Checked, _ttaBox.Checked, _notificationsBox.Checked);
+            ValidateWritableFolder("一括処理先", batch);
+            Result = new AppSettings(screenshot, backup, original, _retouchBox.Checked, _startupBox.Checked, _ttaBox.Checked, _notificationsBox.Checked, batch, _discardOriginalBox.Checked);
+            BatchProcessRequested = batchRequested;
             DialogResult = Forms.DialogResult.OK; Close();
         }
         catch (Exception ex) { Forms.MessageBox.Show($"保存先を確認してください。\n{ex.Message}", "設定", Forms.MessageBoxButtons.OK, Forms.MessageBoxIcon.Warning); }
@@ -717,6 +843,7 @@ internal sealed class WatcherService : IDisposable
     private readonly Action<string> _monitorStatus;
     private readonly Action<ProcessingNotice> _notify;
     private readonly Action<ProcessingBatchResult> _batchResult;
+    private readonly ProcessedLedger _processedLedger;
     private TaskCompletionSource _idle = CompletedSource();
     private FileSystemWatcher? _watcher;
     private AppSettings _settings;
@@ -741,7 +868,7 @@ internal sealed class WatcherService : IDisposable
     private readonly HashSet<FileSystemWatcher> _recoveringWatchers = new();
     private static readonly TimeSpan[] RecoveryDelays = { TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30) };
 
-    public WatcherService(AppSettings settings, Action<string> log, Action<string> processingStatus, Action<string> monitorStatus, Action<ProcessingNotice> notify, Action<ProcessingBatchResult> batchResult)
+    public WatcherService(AppSettings settings, Action<string> log, Action<string> processingStatus, Action<string> monitorStatus, Action<ProcessingNotice> notify, Action<ProcessingBatchResult> batchResult, string? processedLedgerPath = null)
     {
         _settings = settings;
         _log = log;
@@ -749,6 +876,7 @@ internal sealed class WatcherService : IDisposable
         _monitorStatus = monitorStatus;
         _notify = notify;
         _batchResult = batchResult;
+        _processedLedger = new ProcessedLedger(processedLedgerPath ?? AppInfo.ProcessedLedgerFile, _log);
         Configure(settings);
     }
 
@@ -819,6 +947,7 @@ internal sealed class WatcherService : IDisposable
         Directory.CreateDirectory(settings.ScreenshotFolder);
         Directory.CreateDirectory(settings.BackupFolder);
         Directory.CreateDirectory(settings.OriginalFolder);
+        Directory.CreateDirectory(settings.BatchFolder);
         var watcher = new FileSystemWatcher(settings.ScreenshotFolder, "*.png")
         {
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.Size | NotifyFilters.LastWrite,
@@ -976,28 +1105,98 @@ internal sealed class WatcherService : IDisposable
         return paused;
     }
 
-    private void Queue(string path, FileSystemWatcher? sourceWatcher = null)
+    public Task QueueUnprocessedAsync(string folder)
+    {
+        return Task.Run(() => QueueUnprocessed(folder));
+    }
+
+    private void QueueUnprocessed(string folder)
+    {
+        AppSettings settings;
+        try { folder = Path.GetFullPath(folder); }
+        catch (Exception ex)
+        {
+            _log($"一括処理先を確認できませんでした: {ex.Message}");
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (_disposed) return;
+            settings = _settings;
+            if (!_accepting || _paused)
+            {
+                _processingStatus(_paused ? "一時停止中のため一括処理を開始できません" : "設定反映待ちのため一括処理を開始できません");
+                return;
+            }
+            if (!settings.RetouchEnabled)
+            {
+                _processingStatus("レタッチが無効のため一括処理を開始できません");
+                return;
+            }
+        }
+
+        _processingStatus($"未処理画像を検索中: {Path.GetFileName(folder)}");
+        List<string> candidates;
+        try
+        {
+            candidates = Directory.EnumerateFiles(folder, "*.png", SearchOption.TopDirectoryOnly)
+                .Where(path => IsUnprocessed(path, settings))
+                .OrderBy(path => GetCreationTimeUtc(path))
+                .ThenBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            _log($"未処理画像の検索に失敗しました: {ex.Message}");
+            _processingStatus("一括処理の検索に失敗しました");
+            return;
+        }
+
+        if (candidates.Count == 0)
+        {
+            _log($"一括処理対象の未処理画像はありません: {folder}");
+            if (GetActiveCount() == 0) _processingStatus("未処理画像はありません");
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (_disposed) return;
+            _deferredCandidates.UnionWith(candidates);
+        }
+        try
+        {
+            foreach (var path in candidates) Queue(path);
+        }
+        finally
+        {
+            lock (_gate) _deferredCandidates.ExceptWith(candidates);
+        }
+        _log($"一括処理を開始しました: {candidates.Count}件 ({folder})");
+    }
+
+    private bool Queue(string path, FileSystemWatcher? sourceWatcher = null)
     {
         AppSettings settings;
         string queuedStatus;
+        try { path = Path.GetFullPath(path); }
+        catch { return false; }
         lock (_gate)
         {
-            if (_disposed || !path.EndsWith(".png", StringComparison.OrdinalIgnoreCase)) return;
+            if (_disposed || !path.EndsWith(".png", StringComparison.OrdinalIgnoreCase)) return false;
             if (_reconfiguring)
             {
-                if (sourceWatcher is not null && ReferenceEquals(_reconfigureWatcher, sourceWatcher))
-                {
-                    _reconfigureSeen.Add(path);
-                    _reconfigureCandidates.Add(path);
-                }
-                return;
+                if (sourceWatcher is not null && ReferenceEquals(_reconfigureWatcher, sourceWatcher)) _reconfigureSeen.Add(path);
+                _reconfigureCandidates.Add(path);
+                return false;
             }
-            if (sourceWatcher is not null && !ReferenceEquals(_watcher, sourceWatcher)) return;
-            if (!_accepting || _paused || !_settings.RetouchEnabled || !File.Exists(path)) return;
+            if (sourceWatcher is not null && !ReferenceEquals(_watcher, sourceWatcher)) return false;
+            if (!_accepting || _paused || !_settings.RetouchEnabled || !File.Exists(path)) return false;
             settings = _settings;
-            if (_suppressUntil.TryGetValue(path, out var until) && until > DateTime.UtcNow) return;
-            if (File.Exists(Path.Combine(settings.OriginalFolder, Path.GetFileName(path)))) return;
-            if (!_pending.TryAdd(path, 0)) return;
+            if (_suppressUntil.TryGetValue(path, out var until) && until > DateTime.UtcNow) return false;
+            if (!IsUnprocessed(path, settings)) return false;
+            if (!_pending.TryAdd(path, 0)) return false;
             if (_active == 0)
             {
                 _idle = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1079,19 +1278,50 @@ internal sealed class WatcherService : IDisposable
                 }
             }
         });
+        return true;
+    }
+
+    private bool IsUnprocessed(string path, AppSettings settings)
+    {
+        if (!File.Exists(path)) return false;
+        if (File.Exists(Path.Combine(settings.OriginalFolder, Path.GetFileName(path)))) return false;
+        return !settings.DiscardOriginalEnabled || !_processedLedger.Matches(path);
+    }
+
+    private static DateTime GetCreationTimeUtc(string path)
+    {
+        try { return File.GetCreationTimeUtc(path); }
+        catch { return DateTime.MaxValue; }
     }
 
     private async Task<bool> ProcessOne(string path, AppSettings settings)
     {
         await WaitUntilStable(path); if (!File.Exists(path)) return false;
         var originalPath = Path.Combine(settings.OriginalFolder, Path.GetFileName(path));
-        if (File.Exists(originalPath)) return false;
+        if (!IsUnprocessed(path, settings)) return false;
         var temp = path + "." + Guid.NewGuid().ToString("N") + ".retouching.tmp";
-        var creation = File.GetCreationTimeUtc(path); _suppressUntil[path] = DateTime.UtcNow.AddMinutes(2);
+        var creation = File.GetCreationTimeUtc(path);
+        var lastWrite = File.GetLastWriteTimeUtc(path);
+        var sourceStamp = new ProcessedFileStamp(new FileInfo(path).Length, lastWrite.Ticks);
+        _suppressUntil[path] = DateTime.UtcNow.AddMinutes(2);
         try
         {
-            Enhancer.Process(path, temp, settings.TtaEnabled); File.SetCreationTimeUtc(temp, creation); MoveAcrossVolumes(path, originalPath);
-            try { File.Move(temp, path, false); } catch { if (!File.Exists(path)) MoveAcrossVolumes(originalPath, path); throw; }
+            Enhancer.Process(path, temp, settings.TtaEnabled);
+            File.SetCreationTimeUtc(temp, creation);
+            File.SetLastWriteTimeUtc(temp, lastWrite);
+            if (settings.DiscardOriginalEnabled)
+            {
+                var current = new FileInfo(path);
+                if (!current.Exists || current.Length != sourceStamp.Length || current.LastWriteTimeUtc.Ticks != sourceStamp.LastWriteTimeUtcTicks)
+                    throw new IOException("処理中に元画像が変更されたため、結果を保存しませんでした。");
+                ReplaceExistingFile(temp, path);
+                _processedLedger.Mark(path);
+            }
+            else
+            {
+                MoveAcrossVolumes(path, originalPath);
+                try { File.Move(temp, path, false); } catch { if (!File.Exists(path)) MoveAcrossVolumes(originalPath, path); throw; }
+            }
             EnforceLimit(settings, path);
             _log($"処理完了: {Path.GetFileName(path)}");
             var waiting = Math.Max(0, GetActiveCount() - 1);
@@ -1099,6 +1329,18 @@ internal sealed class WatcherService : IDisposable
             return true;
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }
+    }
+
+    private static void ReplaceExistingFile(string temporary, string destination)
+    {
+        try
+        {
+            File.Replace(temporary, destination, null, true);
+        }
+        catch (PlatformNotSupportedException)
+        {
+            File.Move(temporary, destination, true);
+        }
     }
 
     private string QueuedStatus()
@@ -1147,7 +1389,9 @@ internal sealed class WatcherService : IDisposable
             protectedPaths.UnionWith(_reconfigureCandidates);
             protectedPaths.UnionWith(_deferredCandidates);
             protectedPaths.Remove(currentPath);
-            var files = new DirectoryInfo(settings.ScreenshotFolder)
+            var sourceFolder = Path.GetDirectoryName(currentPath);
+            if (string.IsNullOrWhiteSpace(sourceFolder)) sourceFolder = settings.ScreenshotFolder;
+            var files = new DirectoryInfo(sourceFolder)
                 .GetFiles("*.png")
                 .Where(file => !protectedPaths.Contains(file.FullName))
                 .OrderBy(f => f.CreationTimeUtc)

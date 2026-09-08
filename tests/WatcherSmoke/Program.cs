@@ -13,6 +13,8 @@ internal static class WatcherSmokeProgram
         await Run("transition capture and old/new folder scan", TransitionCaptureAndFolderScan, failures);
         await Run("transition candidates stay protected from retention", TransitionCandidatesStayProtected, failures);
         await Run("configured watcher stays gated until acceptance", ConfiguredWatcherStaysGated, failures);
+        await Run("batch scan skips processed files", BatchScanSkipsProcessedFiles, failures);
+        await Run("sample failure is reported instead of escaping", SampleFailureIsReported, failures);
 
         if (failures.Count == 0)
         {
@@ -146,8 +148,46 @@ internal static class WatcherSmokeProgram
         finally { TryDelete(root); }
     }
 
-    private static AppSettings Settings(string screenshot, string backup, string original, bool retouch, bool notifications) =>
-        new(screenshot, backup, original, retouch, false, false, notifications);
+    private static async Task BatchScanSkipsProcessedFiles()
+    {
+        var root = Directory.CreateTempSubdirectory("starez-watcher-batch-").FullName;
+        try
+        {
+            var folder = Directory.CreateDirectory(Path.Combine(root, "batch")).FullName;
+            var backup = Directory.CreateDirectory(Path.Combine(root, "backup")).FullName;
+            var original = Directory.CreateDirectory(Path.Combine(root, "original")).FullName;
+            var ledgerPath = Path.Combine(root, "processed.json");
+            var processed = Path.Combine(folder, "processed.png");
+            await File.WriteAllBytesAsync(processed, new byte[] { 1, 2, 3 });
+            var ledger = new ProcessedLedger(ledgerPath, _ => { });
+            ledger.Mark(processed);
+            var statuses = new ConcurrentQueue<string>();
+            using var watcher = new WatcherService(Settings(folder, backup, original, true, false, true), _ => { }, statuses.Enqueue, _ => { }, _ => { }, _ => { }, ledgerPath);
+            await watcher.QueueUnprocessedAsync(folder);
+            Assert(statuses.Any(status => status == "未処理画像はありません"), "processed file was skipped by the batch scan");
+            Assert(File.Exists(processed), "processed file remained in place");
+            await watcher.StopAsync(TimeSpan.FromSeconds(5));
+        }
+        finally { TryDelete(root); }
+    }
+
+    private static Task SampleFailureIsReported()
+    {
+        var root = Directory.CreateTempSubdirectory("starez-sample-error-").FullName;
+        try
+        {
+            var missing = Path.Combine(root, "missing.png");
+            var output = Path.Combine(root, "output.png");
+            var exitCode = Program.RunSample(missing, output);
+            Assert(exitCode != 0, "sample mode returned success for an invalid input");
+            Assert(!File.Exists(output), "sample mode created an output after failure");
+        }
+        finally { TryDelete(root); }
+        return Task.CompletedTask;
+    }
+
+    private static AppSettings Settings(string screenshot, string backup, string original, bool retouch, bool notifications, bool discardOriginal = false) =>
+        new(screenshot, backup, original, retouch, false, false, notifications, screenshot, discardOriginal);
 
     private static async Task WaitUntil(Func<bool> condition, string description)
     {
