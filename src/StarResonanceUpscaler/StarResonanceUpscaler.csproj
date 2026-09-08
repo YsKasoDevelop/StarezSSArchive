@@ -13,10 +13,10 @@
     <Description>スクリーンショット自動バックアップ＆高画質化（Star Resonance向け非公式ファンツール）</Description>
     <Company>Starez SS Archive contributors</Company>
     <Copyright>Copyright (c) 2026 Starez SS Archive contributors</Copyright>
-    <Version>1.00</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.00.0.0</FileVersion>
-    <InformationalVersion>1.00</InformationalVersion>
+    <Version>1.01</Version>
+    <AssemblyVersion>1.0.1.0</AssemblyVersion>
+    <FileVersion>1.01.0.0</FileVersion>
+    <InformationalVersion>1.01</InformationalVersion>
     <ApplicationIcon>icon.ico</ApplicationIcon>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>

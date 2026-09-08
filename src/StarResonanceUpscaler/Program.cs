@@ -8,7 +8,7 @@ using Forms = System.Windows.Forms;
 internal static class AppInfo
 {
     public const string Name = "スタレゾ SS アーカイブ";
-    public const string Version = "1.00";
+    public const string Version = "1.01";
     public const string Description = "スクリーンショット自動バックアップ＆高画質化\nStar Resonance向け非公式ファンツール\n公式の承認・提携・保証はありません";
     public const string DataFolderName = "StarezSSArchive";
     public const string LegacyDataFolderName = "BPSRSSbackup";
