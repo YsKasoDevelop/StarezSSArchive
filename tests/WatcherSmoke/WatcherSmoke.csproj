@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <StartupObject>WatcherSmokeProgram</StartupObject>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="../../src/StarResonanceUpscaler/Program.cs" Link="ProductionProgram.cs" />
+    <Compile Include="../../src/StarResonanceUpscaler/Enhancer.cs" Link="Enhancer.cs" />
+    <Compile Include="../../src/StarResonanceUpscaler/EngineInstallation.cs" Link="EngineInstallation.cs" />
+    <Compile Include="../../src/StarResonanceUpscaler/RuntimeTerms.cs" Link="RuntimeTerms.cs" />
+  </ItemGroup>
+</Project>
